@@ -278,7 +278,7 @@ def start_dns_challenge(logger, acme_client, dns_challenge_completer,
 
 
 def complete_dns_challenge(logger, acme_client, dns_challenge_completer,
-                           elb_name, authz_record):
+                           elb_name, authz_record, skip_local_validation):
     logger.emit(
         "updating-elb.wait-for-route53",
         elb_name=elb_name, host=authz_record.host
@@ -287,17 +287,23 @@ def complete_dns_challenge(logger, acme_client, dns_challenge_completer,
 
     response = authz_record.dns_challenge.response(acme_client.key)
 
-    logger.emit(
-        "updating-elb.local-validation",
-        elb_name=elb_name, host=authz_record.host
-    )
-    verified = response.simple_verify(
-        authz_record.dns_challenge.chall,
-        authz_record.host,
-        acme_client.key.public_key()
-    )
-    if not verified:
-        raise ValueError("Failed verification")
+    if skip_local_validation:
+        logger.emit(
+            "updating-elb.skipping-local-validation",
+            elb_name=elb_name, host=authz_record.host
+        )
+    else:
+        logger.emit(
+            "updating-elb.local-validation",
+            elb_name=elb_name, host=authz_record.host
+        )
+        locally_verified = response.simple_verify(
+            authz_record.dns_challenge.chall,
+            authz_record.host,
+            acme_client.key.public_key()
+        )
+        if not locally_verified:
+            raise ValueError("Failed local verification")
 
     logger.emit(
         "updating-elb.answer-challenge",
@@ -327,7 +333,8 @@ def request_certificate(logger, acme_client, elb_name, authorizations, csr):
     return pem_certificate, pem_certificate_chain
 
 
-def update_elb(logger, acme_client, force_issue, cert_request):
+def update_elb(logger, acme_client, force_issue, skip_local_validation,
+               cert_request):
     logger.emit("updating-elb", elb_name=cert_request.cert_location.elb_name)
 
     current_cert = cert_request.cert_location.get_current_certificate()
@@ -382,7 +389,8 @@ def update_elb(logger, acme_client, force_issue, cert_request):
         for authz_record in authorizations:
             complete_dns_challenge(
                 logger, acme_client, cert_request.dns_challenge_completer,
-                cert_request.cert_location.elb_name, authz_record
+                cert_request.cert_location.elb_name, authz_record,
+                skip_local_validation
             )
 
         pem_certificate, pem_certificate_chain = request_certificate(
@@ -409,12 +417,14 @@ def update_elb(logger, acme_client, force_issue, cert_request):
             )
 
 
-def update_elbs(logger, acme_client, force_issue, certificate_requests):
+def update_elbs(logger, acme_client, force_issue, skip_local_validation,
+                certificate_requests):
     for cert_request in certificate_requests:
         update_elb(
             logger,
             acme_client,
             force_issue,
+            skip_local_validation,
             cert_request,
         )
 
@@ -461,7 +471,13 @@ def cli():
         "expiration."
     )
 )
-def update_certificates(persistent=False, force_issue=False):
+@click.option(
+    "--skip-local-validation", is_flag=True, help=(
+        "Do not locally validate the ACME DNS challenge."
+    )
+)
+def update_certificates(persistent=False, force_issue=False,
+                        skip_local_validation=False):
     logger = Logger()
     logger.emit("startup")
 
@@ -508,7 +524,8 @@ def update_certificates(persistent=False, force_issue=False):
         while True:
             update_elbs(
                 logger, acme_client,
-                force_issue, certificate_requests
+                force_issue, skip_local_validation,
+                certificate_requests
             )
             # Sleep before we check again
             logger.emit("sleeping", duration=PERSISTENT_SLEEP_INTERVAL)
@@ -517,7 +534,8 @@ def update_certificates(persistent=False, force_issue=False):
         logger.emit("running", mode="single")
         update_elbs(
             logger, acme_client,
-            force_issue, certificate_requests
+            force_issue, skip_local_validation,
+            certificate_requests
         )
 
 
