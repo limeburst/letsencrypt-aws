@@ -16,6 +16,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
 
 import boto3
+import botocore
 
 import OpenSSL.crypto
 
@@ -27,6 +28,7 @@ CERTIFICATE_EXPIRATION_THRESHOLD = datetime.timedelta(days=45)
 # One day
 PERSISTENT_SLEEP_INTERVAL = 60 * 60 * 24
 DNS_TTL = 30
+MAX_RETRIES = 3
 
 
 class Logger(object):
@@ -110,13 +112,22 @@ class ELBCertificate(object):
 
         # Sleep before trying to set the certificate, it appears to sometimes
         # fail without this.
-        time.sleep(15)
         logger.emit("updating-elb.set-elb-certificate", elb_name=self.elb_name)
-        self.elb_client.set_load_balancer_listener_ssl_certificate(
-            LoadBalancerName=self.elb_name,
-            SSLCertificateId=new_cert_arn,
-            LoadBalancerPort=self.elb_port,
-        )
+        for retry_count in range(MAX_RETRIES):
+            time.sleep(15 ** (retry_count + 1))
+            try:
+                self.elb_client.set_load_balancer_listener_ssl_certificate(
+                    LoadBalancerName=self.elb_name,
+                    SSLCertificateId=new_cert_arn,
+                    LoadBalancerPort=self.elb_port,
+                )
+            except botocore.exceptions.ClientError:
+                logger.emit("updating-elb.set-elb-certificate-failed",
+                            elb_name=self.elb_name, retry_count=retry_count,
+                            max_retries=MAX_RETRIES)
+                continue
+            else:
+                break
 
 
 class Route53ChallengeCompleter(object):
